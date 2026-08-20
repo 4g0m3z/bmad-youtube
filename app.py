@@ -4,8 +4,8 @@ from google import genai
 from google.genai import types
 
 # Definimos los modelos de Google AI Studio a utilizar
-MODELO_PRO = "gemini-2.5-pro"
-MODELO_FLASH = "gemini-2.5-flash"
+MODELO_PRO = "gemini-3.5-flash"
+MODELO_FLASH = "gemini-3.5-flash"
 
 print("🤖 Inicializando agentes bajo metodología BMAD...")
 
