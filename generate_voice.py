@@ -4,6 +4,16 @@ import time
 import subprocess
 import sys
 
+# Asegurar compatibilidad UTF-8 en terminales Windows
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 # Asegurar importación de pydub en el entorno virtual
 try:
     from pydub import AudioSegment
@@ -16,13 +26,17 @@ from dotenv import load_dotenv
 
 # Carga de variables de entorno
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_KEY:
+    print("⚠️ Advertencia: OPENAI_API_KEY no está configurada en .env.")
+client = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
 
 GUION_PATH = "outputs/guion_final.md"
 AUDIO_OUTPUT_PATH = "outputs/audio_maestro.mp3"
 
-# Usaremos 'shimmer' o 'alloy'. Al acelerar ligeramente a 1.05 / 1.08 reduce el dejo anglosajón.
-VOZ_CONFIGURADA = "alloy"
+VOZ_CONFIGURADA = os.getenv("TTS_VOICE", "alloy")
+VELOCIDAD_VOZ = float(os.getenv("TTS_SPEED", "1.05"))
 
 
 def limpiar_y_parsear_guion_bmad(ruta_archivo):
@@ -88,8 +102,11 @@ def generar_audio_maestro_estable():
     print("🧹 [AUDIO_AGENT] Iniciando parser determinista bajo especificaciones BMAD...")
     bloques_guion = limpiar_y_parsear_guion_bmad(GUION_PATH)
 
+    if not client:
+        raise RuntimeError("❌ No se puede generar audio porque OPENAI_API_KEY no está configurada.")
+
     print(f"📦 Pipeline estructurado con éxito en {len(bloques_guion)} elementos secuenciales.")
-    print(f"🤖 Conectando con la API de OpenAI TTS (Voz: {VOZ_CONFIGURADA})...")
+    print(f"🤖 Conectando con la API de OpenAI TTS (Voz: {VOZ_CONFIGURADA}, Velocidad: {VELOCIDAD_VOZ})...")
 
     audio_unificado = AudioSegment.empty()
     temp_files = []
@@ -114,7 +131,7 @@ def generar_audio_maestro_estable():
                 model="tts-1",
                 voice=VOZ_CONFIGURADA,
                 input=elemento,
-                speed=1.05,
+                speed=VELOCIDAD_VOZ,
             )
 
             with open(temp_chunk_path, "wb") as f:

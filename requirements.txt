@@ -1,3 +1,8 @@
-crewai==1.15.16
-google-genai==2.18.1
-python-dotenv==1.2.3
+crewai>=1.15.0
+google-genai>=2.18.0
+python-dotenv>=1.2.0
+openai>=1.50.0
+pydub>=0.25.1
+moviepy>=1.0.3
+imageio-ffmpeg>=0.5.1
+rich>=13.0.0

@@ -1,13 +1,10 @@
-"""Agentes CrewAI para producir videos largos con metodologia BMAD."""
-
+import os
 from crewai import Agent
 
-# Añadimos el prefijo 'gemini/' para que CrewAI sepa qué proveedor usar 
-# MODELO_PRO = "gemini/gemini-3.1-pro-preview"
-# MODELO_FLASH = "gemini/gemini-3.1-flash"
-# Seteo estricto para evitar la cuota restringida de la versión 3.1 Pro:
-MODELO_PRO = "gemini/gemini-3.6-flash"
-MODELO_FLASH = "gemini/gemini-3.6-flash"
+# Modelos para CrewAI (con prefijo 'gemini/' para LiteLLM)
+# Se pueden sobreescribir mediante variables de entorno GEMINI_MODEL_PRO / GEMINI_MODEL_FLASH
+MODELO_PRO = os.getenv("GEMINI_MODEL_PRO", "gemini/gemini-2.0-flash")
+MODELO_FLASH = os.getenv("GEMINI_MODEL_FLASH", "gemini/gemini-2.0-flash")
 
 
 investigador_bmad = Agent(

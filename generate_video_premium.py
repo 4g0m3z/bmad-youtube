@@ -2,38 +2,78 @@ import os
 import json
 import time
 import sys
+import argparse
 from pathlib import Path
-from google import genai
-from google.genai import types
-from google.genai.errors import APIError
+
+# Asegurar compatibilidad UTF-8 en terminales Windows
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # ==============================================================================
-# CONFIGURACIÓN DE RUTAS DEL PROYECTO
+# CONFIGURACIÓN DE RUTAS Y MODELOS
 # ==============================================================================
-MODEL_ID = os.getenv("VEO_MODEL_ID", "veo-3.1-fast-generate-preview")
+MODEL_ID = os.getenv("VEO_MODEL_ID", "veo-3.1-generate-preview")
 PROMPTS_FILE = Path("outputs/prompts_video.md")
 OUTPUT_DIR = Path("outputs/videos_finales")
 STATE_FILE = Path("outputs/video_generation_state.json")
 
-# Parámetros técnicos solicitados
-ASPECT_RATIO = "16:9"
-VIDEO_DURATION_SECONDS = 8
+# Parámetros técnicos de video
+ASPECT_RATIO = os.getenv("VEO_ASPECT_RATIO", "16:9")
+VIDEO_DURATION_SECONDS = int(os.getenv("VEO_DURATION_SECONDS", "5"))
 
 # Configuración de resiliencia
 MAX_RETRIES = 5
 BASE_DELAY = 10
 RETRYABLE_STATUS_CODES = [429, 503]
 
-# Inicializar cliente de Google GenAI
-if not os.environ.get("GEMINI_API_KEY"):
-    print("❌ Error crítico: La variable de entorno GEMINI_API_KEY no está configurada.")
-    print("Configúrala en tu terminal de VS Code ejecutando: export GEMINI_API_KEY='tu_llave'")
-    sys.exit(1)
 
-client = genai.Client()
+def get_genai_client():
+    """Inicializa y valida el cliente de Google GenAI."""
+    try:
+        from google import genai
+    except ImportError:
+        print("❌ Error: 'google-genai' no está instalado. Ejecuta: pip install google-genai")
+        sys.exit(1)
 
-# Asegurar que las carpetas de salida existan
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        print("❌ Error crítico: La variable de entorno GEMINI_API_KEY no está configurada.")
+        print("Defínela en tu archivo .env o en las variables de tu sistema.")
+        sys.exit(1)
+    return genai.Client(api_key=api_key)
+
+
+def check_available_models():
+    """Consulta y lista los modelos disponibles en la API de Google GenAI."""
+    client = get_genai_client()
+    print("🔍 Consultando modelos disponibles en tu cuenta de Google AI Studio...")
+    try:
+        models = client.models.list()
+        print("\n📋 Modelos encontrados:")
+        found_any = False
+        for m in models:
+            name = getattr(m, 'name', str(m))
+            display_name = getattr(m, 'display_name', '')
+            supported_actions = getattr(m, 'supported_actions', [])
+            print(f"  • {name} ({display_name}) - Acciones: {supported_actions}")
+            found_any = True
+        if not found_any:
+            print("  (No se listaron modelos o la cuenta tiene restricciones)")
+    except Exception as e:
+        print(f"❌ Error al consultar lista de modelos: {e}")
+
 
 # ==============================================================================
 # FUNCIONES DE PERSISTENCIA Y LECTURA DE MARKDOWN
@@ -50,7 +90,7 @@ def load_prompts_from_markdown():
         with open(PROMPTS_FILE, 'r', encoding='utf-8') as f:
             for line in f:
                 clean_line = line.strip()
-                if "Google Veo Prompt:" in clean_line:
+                if "Google Veo Prompt:" in clean_line or "**Prompt:**" in clean_line:
                     awaiting_prompt = True
                     continue
                 if awaiting_prompt and clean_line.startswith(">"):
@@ -60,13 +100,24 @@ def load_prompts_from_markdown():
                     awaiting_prompt = False
 
         if not prompts:
-            print(f"⚠️ Advertencia: El archivo '{PROMPTS_FILE}' está vacío o no contiene líneas de texto válidas.")
+            # Fallback: intentar extraer bloques de código o líneas de prompt numeradas
+            with open(PROMPTS_FILE, 'r', encoding='utf-8') as f:
+                content = f.read()
+                # Extraer bloques de prompt entre comillas o líneas con formato
+                import re
+                matches = re.findall(r"(?:Prompt|Google Veo Prompt)[\s\:\*]+>*\s*([^\n\r]+)", content, re.IGNORECASE)
+                if matches:
+                    prompts = [m.strip().strip("> ") for m in matches if len(m.strip()) > 10]
+
+        if not prompts:
+            print(f"⚠️ Advertencia: El archivo '{PROMPTS_FILE}' no contiene prompts reconocibles con el formato esperado.")
             sys.exit(1)
 
         return prompts
     except Exception as e:
         print(f"❌ Error al leer el archivo Markdown: {str(e)}")
         sys.exit(1)
+
 
 def load_state():
     """Carga el estado de progreso para reanudación."""
@@ -95,8 +146,10 @@ def load_state():
             print("⚠️ Archivo de estado corrupto. Se creará uno nuevo.")
     return {"completed_indices": [], "failed_indices": {}}
 
+
 def save_state(state):
-    """Guarda el progreso actual."""
+    """Guarda el progreso actual de forma atómica."""
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     temporary_state_file = STATE_FILE.with_suffix('.json.tmp')
     with open(temporary_state_file, 'w', encoding='utf-8') as f:
         json.dump(state, f, indent=4, ensure_ascii=False)
@@ -104,39 +157,51 @@ def save_state(state):
         os.fsync(f.fileno())
     temporary_state_file.replace(STATE_FILE)
 
+
 def video_output_path(scene_index):
     """Devuelve la ruta estable del video de una escena."""
-    return OUTPUT_DIR / f"escena_{scene_index}.mp4"
+    return OUTPUT_DIR / f"escena_{scene_index:03d}.mp4"
+
 
 def is_completed_video(scene_index):
     """Comprueba que existe un MP4 completo antes de saltar una escena."""
     output_path = video_output_path(scene_index)
-    return output_path.is_file() and output_path.stat().st_size > 0
+    # Comprobar tanto formato escena_0.mp4 como escena_000.mp4
+    alt_path = OUTPUT_DIR / f"escena_{scene_index}.mp4"
+    return (output_path.is_file() and output_path.stat().st_size > 0) or (alt_path.is_file() and alt_path.stat().st_size > 0)
+
 
 # ==============================================================================
-# LOGICA DE LLAMADA CON RESILIENCIA
+# LÓGICA DE LLAMADA CON RESILIENCIA
 # ==============================================================================
-def generate_video_with_retry(prompt, scene_index):
-    """Ejecuta la llamada a la API implementando reintentos ante saturación."""
-    config = types.GenerateVideosConfig(
-        aspect_ratio=ASPECT_RATIO,
-        duration_seconds=VIDEO_DURATION_SECONDS
-    )
+def generate_video_with_retry(client, prompt, scene_index):
+    """Ejecuta la llamada a la API implementando reintentos ante saturación y fallbacks de configuración."""
+    from google.genai import types
+    from google.genai.errors import APIError
+
+    # Configuración inicial
+    config_kwargs = {}
+    if ASPECT_RATIO:
+        config_kwargs["aspect_ratio"] = ASPECT_RATIO
+    if VIDEO_DURATION_SECONDS and VIDEO_DURATION_SECONDS > 0:
+        config_kwargs["duration_seconds"] = VIDEO_DURATION_SECONDS
+
+    current_config = types.GenerateVideosConfig(**config_kwargs)
 
     for attempt in range(MAX_RETRIES):
         try:
-            print(f"🎬 [Escena {scene_index}] Enviando a {MODEL_ID}... (Intento {attempt + 1}/{MAX_RETRIES})")
+            print(f"🎬 [Escena {scene_index}] Enviando a modelo '{MODEL_ID}'... (Intento {attempt + 1}/{MAX_RETRIES})")
 
             operation = client.models.generate_videos(
                 model=MODEL_ID,
                 source=types.GenerateVideosSource(prompt=prompt),
-                config=config
+                config=current_config
             )
 
-            print(f"⏳ [Escena {scene_index}] Procesando en Google (ID: {operation.name})...")
+            print(f"⏳ [Escena {scene_index}] Procesando en Google (Operación: {operation.name})...")
 
             while not operation.done:
-                time.sleep(20)
+                time.sleep(15)
                 operation = client.operations.get(operation)
 
             result = operation.result
@@ -148,20 +213,25 @@ def generate_video_with_retry(prompt, scene_index):
         except APIError as e:
             print(f"⚠️ [API Error - Escena {scene_index}]: Código {e.code} - {e.message}")
 
+            # Si la API rechaza el valor explícito de duration_seconds, reintentar con el default nativo
+            if e.code == 400 and "durationSeconds" in str(e.message):
+                print(f"🔄 Reintentando con la duración predeterminada nativa del modelo '{MODEL_ID}'...")
+                current_config = types.GenerateVideosConfig(aspect_ratio=ASPECT_RATIO)
+                time.sleep(2)
+                continue
+
             if e.code in RETRYABLE_STATUS_CODES and attempt < MAX_RETRIES - 1:
                 delay = BASE_DELAY * (2 ** attempt)
-                print(f"⏳ Servidor saturado o límite alcanzado. Esperando {delay} segundos antes de reintentar...")
+                print(f"⏳ Servidor ocupado o cuota temporal. Esperando {delay}s antes de reintentar...")
                 time.sleep(delay)
             else:
                 if e.code == 404:
                     raise RuntimeError(
-                        f"El modelo '{MODEL_ID}' no está disponible para la API "
-                        "v1beta o no admite predictLongRunning en este proyecto. "
-                        "Consulta client.models.list() y usa un modelo Veo "
-                        "habilitado para tu cuenta."
+                        f"El modelo '{MODEL_ID}' no está disponible o no admite generación de video en este proyecto. "
+                        "Ejecuta con --check-models para ver los modelos habilitados en tu cuenta."
                     ) from e
                 raise RuntimeError(
-                    f"Error no recuperable de Google (código {e.code}): {e.message}"
+                    f"Error de Google (código {e.code}): {e.message}"
                 ) from e
         except Exception as e:
             raise RuntimeError(
@@ -170,16 +240,38 @@ def generate_video_with_retry(prompt, scene_index):
 
     raise Exception(f"Fallaron todos los {MAX_RETRIES} intentos por saturación del servicio.")
 
+
 # ==============================================================================
 # FLUJO PRINCIPAL
 # ==============================================================================
 def main():
+    parser = argparse.ArgumentParser(description="Generador de clips de video con Google Veo")
+    parser.add_argument("--check-models", action="store_true", help="Lista los modelos disponibles en tu API key")
+    parser.add_argument("--max-scenes", type=int, default=None, help="Límite de escenas a procesar en esta ejecución")
+    parser.add_argument("--reset-state", action="store_true", help="Reinicia el registro de estado de fallos")
+    args = parser.parse_args()
+
+    if args.check_models:
+        check_available_models()
+        return 0
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    client = get_genai_client()
     prompts_list = load_prompts_from_markdown()
     state = load_state()
 
-    print(f"🚀 Iniciando script Premium.")
-    print(f"📂 Archivo de origen: {PROMPTS_FILE}")
-    print(f"🎬 Total de escenas detectadas en el archivo: {len(prompts_list)}")
+    if args.reset_state:
+        state["failed_indices"] = {}
+        save_state(state)
+        print("🔄 Estado de errores reiniciado.")
+
+    print("=" * 60)
+    print(f"🚀 INICIANDO GENERADOR DE VIDEO BMAD (Google Veo)")
+    print(f"📂 Archivo de prompts: {PROMPTS_FILE}")
+    print(f"🤖 Modelo configurado: {MODEL_ID}")
+    print(f"🎬 Total de escenas detectadas: {len(prompts_list)}")
+    print("=" * 60)
+
     completed_indices = set(state["completed_indices"])
     for index in range(len(prompts_list)):
         if is_completed_video(index):
@@ -187,32 +279,60 @@ def main():
     state["completed_indices"] = sorted(completed_indices)
     save_state(state)
 
-    print(f"🔄 Escenas ya procesadas con éxito: {len(completed_indices)}")
+    print(f"🔄 Escenas ya generadas previamente: {len(completed_indices)}/{len(prompts_list)}")
 
+    processed_count = 0
     for index, prompt_text in enumerate(prompts_list):
-        # Evitar procesar escenas que ya se completaron de forma exitosa
+        if args.max_scenes is not None and processed_count >= args.max_scenes:
+            print(f"\n⏹️ Se alcanzó el límite solicitado de {args.max_scenes} escenas para esta ejecución.")
+            break
+
         if index in completed_indices:
             continue
 
         print(f"\n──────────────────────────────────────────────────────────")
-        print(f"🎥 PROCESANDO ESCENA {index}: '{prompt_text[:60]}...'")
+        print(f"🎥 PROCESANDO ESCENA {index + 1}/{len(prompts_list)}: '{prompt_text[:60]}...'")
         print(f"──────────────────────────────────────────────────────────")
 
         try:
-            video_data = generate_video_with_retry(prompt_text, index)
+            video_data = generate_video_with_retry(client, prompt_text, index)
 
-            # Guardar el video dentro de outputs/videos_finales
-            video_bytes = video_data.video.video_bytes if video_data.video else None
+            # Obtener bytes del video generado
+            video_bytes = None
+            if hasattr(video_data, 'video') and getattr(video_data.video, 'video_bytes', None):
+                video_bytes = video_data.video.video_bytes
+            elif hasattr(video_data, 'video') and getattr(video_data.video, 'image', None) and getattr(video_data.video.image, 'image_bytes', None):
+                video_bytes = video_data.video.image.image_bytes
+            elif hasattr(video_data, 'video') and hasattr(client, 'files') and getattr(video_data.video, 'name', None):
+                try:
+                    video_bytes = client.files.download(file=video_data.video.name)
+                except Exception:
+                    pass
+
             if not video_bytes:
-                raise ValueError("La respuesta no contiene bytes de video válidos.")
+                # Si video_data tiene método download o save
+                if hasattr(video_data, 'video') and hasattr(video_data.video, 'download'):
+                    output_path = video_output_path(index)
+                    video_data.video.download(str(output_path))
+                    if output_path.exists() and output_path.stat().st_size > 0:
+                        video_bytes = b"downloaded"
+                elif hasattr(video_data, 'video') and hasattr(video_data.video, 'save'):
+                    output_path = video_output_path(index)
+                    video_data.video.save(str(output_path))
+                    if output_path.exists() and output_path.stat().st_size > 0:
+                        video_bytes = b"saved"
+
+            if not video_bytes:
+                raise ValueError(f"La respuesta no contiene bytes de video válidos. Estructura: {type(video_data)} - {video_data}")
 
             output_path = video_output_path(index)
-            temporary_output_path = output_path.with_suffix('.mp4.tmp')
-            with open(temporary_output_path, "wb") as f:
-                f.write(video_bytes)
-                f.flush()
-                os.fsync(f.fileno())
-            temporary_output_path.replace(output_path)
+            if video_bytes not in (b"downloaded", b"saved"):
+                temporary_output_path = output_path.with_suffix('.mp4.tmp')
+                with open(temporary_output_path, "wb") as f:
+                    f.write(video_bytes)
+                    f.flush()
+                    os.fsync(f.fileno())
+                temporary_output_path.replace(output_path)
 
             print(f"✅ ¡Escena {index} guardada en: {output_path}!")
 
@@ -221,19 +341,19 @@ def main():
             if str(index) in state["failed_indices"]:
                 del state["failed_indices"][str(index)]
             save_state(state)
+            processed_count += 1
 
         except Exception as e:
-            print(f"❌ La escena {index} falló de forma permanente en este ciclo.")
-            print(f"📝 Razón explícita del fallo: {str(e)}")
+            print(f"❌ La escena {index} falló: {e}")
             state["failed_indices"][str(index)] = str(e)
             save_state(state)
-            print("🛑 Proceso detenido para no avanzar a la siguiente escena.")
-            print("💾 Progreso guardado. Corrige el problema y vuelve a ejecutar el script.")
+            print("🛑 Proceso detenido. Corrige el problema o verifica el modelo y vuelve a ejecutar.")
             return 1
 
-    print("\n🏁 Proceso de renderizado por lotes finalizado.")
-    print(f"🎉 Escenas totales completadas con éxito: {len(state['completed_indices'])}/{len(prompts_list)}")
+    print("\n🏁 Proceso de generación de video finalizado.")
+    print(f"🎉 Escenas totales completadas: {len(state['completed_indices'])}/{len(prompts_list)}")
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

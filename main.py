@@ -1,6 +1,16 @@
-"""Punto de entrada del pipeline BMAD para generar el video de YouTube."""
-
 import os
+import sys
+
+# Asegurar compatibilidad UTF-8 en terminales Windows
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 os.environ["CREWAI_TELEMETRY_OPT_OUT"] = "true"
 os.environ["OTEL_SDK_DISABLED"] = "true"
 
@@ -8,8 +18,11 @@ os.environ["OTEL_SDK_DISABLED"] = "true"
 os.environ["LITELLM_RETRY_STRATEGY"] = "exponential_backoff"
 os.environ["LITELLM_MAX_RETRIES"] = "7"
 
-# El resto de tus imports actuales siguen aquí abajo...
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 from crewai import Crew, Process
 # ... (deja el resto del archivo exactamente igual)
 
