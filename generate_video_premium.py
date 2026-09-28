@@ -24,14 +24,15 @@ except ImportError:
 # ==============================================================================
 # CONFIGURACIÓN DE RUTAS Y MODELOS
 # ==============================================================================
-MODEL_ID = os.getenv("VEO_MODEL_ID", "veo-3.1-generate-preview")
+MODEL_ID = os.getenv("VEO_MODEL_ID", "veo-3.1-generate-preview").strip()
 PROMPTS_FILE = Path("outputs/prompts_video.md")
 OUTPUT_DIR = Path("outputs/videos_finales")
 STATE_FILE = Path("outputs/video_generation_state.json")
 
 # Parámetros técnicos de video
-ASPECT_RATIO = os.getenv("VEO_ASPECT_RATIO", "16:9")
-VIDEO_DURATION_SECONDS = int(os.getenv("VEO_DURATION_SECONDS", "5"))
+ASPECT_RATIO = os.getenv("VEO_ASPECT_RATIO", "16:9").strip()
+dur_env = os.getenv("VEO_DURATION_SECONDS", "").strip()
+VIDEO_DURATION_SECONDS = int(dur_env) if dur_env.isdigit() else None
 
 # Configuración de resiliencia
 MAX_RETRIES = 5
@@ -47,7 +48,7 @@ def get_genai_client():
         print("❌ Error: 'google-genai' no está instalado. Ejecuta: pip install google-genai")
         sys.exit(1)
 
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
         print("❌ Error crítico: La variable de entorno GEMINI_API_KEY no está configurada.")
         print("Defínela en tu archivo .env o en las variables de tu sistema.")

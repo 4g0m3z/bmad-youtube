@@ -1,10 +1,19 @@
+"""
+Módulo de Ensamblado y Renderizado Final para YouTube (BMAD Pipeline).
+Une la secuencia de imágenes conceptuales aplicando el efecto Ken Burns (paneo y zoom dinámico)
+y sincroniza la pista de audio maestro de 17:08 minutos con transiciones suaves.
+"""
+
 import os
 import sys
-import glob
+import json
+import random
 import argparse
 from pathlib import Path
+from PIL import Image
+import numpy as np
 
-# Asegurar compatibilidad UTF-8 en terminales Windows
+# Compatibilidad UTF-8 en terminales Windows
 if sys.platform == "win32":
     try:
         if hasattr(sys.stdout, "reconfigure"):
@@ -13,6 +22,7 @@ if sys.platform == "win32":
             sys.stderr.reconfigure(encoding="utf-8")
     except Exception:
         pass
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -20,165 +30,252 @@ except ImportError:
     pass
 
 OUTPUTS_DIR = Path("outputs")
-VIDEOS_DIR = OUTPUTS_DIR / "videos_finales"
+IMAGENES_DIR = OUTPUTS_DIR / "imagenes"
 AUDIO_PATH = OUTPUTS_DIR / "audio_maestro.mp3"
+TIMELINE_FILE = OUTPUTS_DIR / "scenes_timeline.json"
 DEFAULT_OUTPUT_VIDEO = OUTPUTS_DIR / "video_final_youtube.mp4"
 
 
-def find_video_clips(videos_dir: Path) -> list[Path]:
-    """Busca y ordena los clips de video generados."""
-    if not videos_dir.exists():
-        return []
-    
-    # Buscar patrones escena_*.mp4
-    clips = list(videos_dir.glob("escena_*.mp4"))
-    # Ordenar por índice numérico si es posible
-    def extract_index(path: Path) -> int:
-        name = path.stem.replace("escena_", "")
-        try:
-            return int(name)
-        except ValueError:
-            return 999999
-            
-    clips.sort(key=extract_index)
-    return clips
+def create_ken_burns_clip(
+    image_path: Path,
+    duration: float,
+    target_resolution: tuple[int, int] = (1920, 1080),
+    fps: int = 24,
+    motion_type: int = 0
+):
+    """
+    Crea un VideoClip de MoviePy aplicando un efecto Ken Burns (Zoom/Pan suave) a una imagen estática.
+    """
+    from moviepy.editor import VideoClip
+
+    # Cargar y convertir imagen base
+    pil_img = Image.open(image_path).convert("RGB")
+    target_w, target_h = target_resolution
+    target_ratio = target_w / target_h
+
+    # Recortar imagen base para que coincida exactamente con la relación 16:9
+    img_w, img_h = pil_img.size
+    img_ratio = img_w / img_h
+
+    if img_ratio > target_ratio:
+        # Imagen más ancha: recortar lados
+        new_w = int(img_h * target_ratio)
+        left = (img_w - new_w) // 2
+        pil_img = pil_img.crop((left, 0, left + new_w, img_h))
+    else:
+        # Imagen más alta: recortar arriba/abajo
+        new_h = int(img_w / target_ratio)
+        top = (img_h - new_h) // 2
+        pil_img = pil_img.crop((0, top, img_w, top + new_h))
+
+    # Redimensionar base a 115% de la resolución objetivo para permitir paneos y zoom sin pérdida
+    base_w = int(target_w * 1.15)
+    base_h = int(target_h * 1.15)
+    base_img = pil_img.resize((base_w, base_h), Image.Resampling.LANCZOS)
+
+    # Parámetros de animación según el tipo de movimiento
+    # 0: Zoom In centrado
+    # 1: Zoom Out centrado
+    # 2: Pan Izquierda a Derecha
+    # 3: Pan Derecha a Izquierda
+    # 4: Pan Abajo hacia Arriba
+
+    def make_frame(t):
+        progress = min(max(t / duration, 0.0), 1.0)
+        # Suavizado de curva (ease-in-out sinusoidal)
+        smooth_p = 0.5 * (1.0 - np.cos(np.pi * progress))
+
+        if motion_type == 0:
+            # Zoom In: del 100% al 110% de escala
+            scale = 1.0 + 0.08 * smooth_p
+            curr_w = int(target_w / scale)
+            curr_h = int(target_h / scale)
+            x0 = (base_w - curr_w) // 2
+            y0 = (base_h - curr_h) // 2
+        elif motion_type == 1:
+            # Zoom Out: del 110% al 100% de escala
+            scale = 1.08 - 0.08 * smooth_p
+            curr_w = int(target_w / scale)
+            curr_h = int(target_h / scale)
+            x0 = (base_w - curr_w) // 2
+            y0 = (base_h - curr_h) // 2
+        elif motion_type == 2:
+            # Pan Izquierda -> Derecha
+            curr_w = target_w
+            curr_h = target_h
+            max_x = base_w - curr_w
+            x0 = int(max_x * smooth_p)
+            y0 = (base_h - curr_h) // 2
+        elif motion_type == 3:
+            # Pan Derecha -> Izquierda
+            curr_w = target_w
+            curr_h = target_h
+            max_x = base_w - curr_w
+            x0 = int(max_x * (1.0 - smooth_p))
+            y0 = (base_h - curr_h) // 2
+        else:
+            # Pan Abajo -> Arriba
+            curr_w = target_w
+            curr_h = target_h
+            max_y = base_h - curr_h
+            x0 = (base_w - curr_w) // 2
+            y0 = int(max_y * (1.0 - smooth_p))
+
+        cropped = base_img.crop((x0, y0, x0 + curr_w, y0 + curr_h))
+        if cropped.size != (target_w, target_h):
+            cropped = cropped.resize((target_w, target_h), Image.Resampling.BILINEAR)
+
+        return np.array(cropped)
+
+    return VideoClip(make_frame, duration=duration)
 
 
 def assemble_final_video(
-    videos_dir: Path = VIDEOS_DIR,
+    images_dir: Path = IMAGENES_DIR,
     audio_path: Path = AUDIO_PATH,
     output_path: Path = DEFAULT_OUTPUT_VIDEO,
+    timeline_file: Path = TIMELINE_FILE,
     target_fps: int = 24,
     resolution: tuple[int, int] = (1920, 1080)
 ) -> bool:
     """
-    Ensambla la secuencia de clips con la pista de audio maestro.
+    Ensambla las imágenes conceptuales con movimiento Ken Burns y el audio maestro de 17:08 min.
     """
-    print("=" * 60)
-    print("🎬 INICIANDO ENSAMBLE FINAL DE VIDEO (BMAD Pipeline)")
-    print(f"📁 Directorio de clips: {videos_dir}")
+    print("=" * 65)
+    print("🎬 INICIANDO ENSAMBLADOR DE VIDEO CONCEPTUAL (Efecto Ken Burns)")
+    print(f"📁 Directorio de imágenes: {images_dir}")
     print(f"🎵 Pista de audio: {audio_path}")
-    print(f"💾 Destino: {output_path}")
-    print("=" * 60)
+    print(f"💾 Video final: {output_path}")
+    print("=" * 65)
 
     if not audio_path.exists():
         print(f"❌ Error: No se encontró la pista de audio en '{audio_path}'.")
-        print("Ejecuta primero 'python generate_voice.py' para generar la narración.")
         return False
-
-    clips_paths = find_video_clips(videos_dir)
-    if not clips_paths:
-        print(f"❌ Error: No se encontraron clips de video en '{videos_dir}'.")
-        print("Ejecuta 'python generate_video_premium.py' para generar los clips de video.")
-        return False
-
-    print(f"📦 Clips de video encontrados: {len(clips_paths)}")
 
     try:
-        from moviepy.editor import (
-            VideoFileClip,
-            AudioFileClip,
-            concatenate_videoclips,
-            CompositeVideoClip
-        )
+        from moviepy.editor import AudioFileClip, concatenate_videoclips
     except ImportError:
-        print("❌ Error: 'moviepy' no está instalado.")
-        print("Instálalo ejecutando: pip install moviepy imageio-ffmpeg")
+        print("❌ Error: 'moviepy' no está instalado. Ejecuta: pip install moviepy")
         return False
 
-    try:
-        print("⏳ Cargando pista de audio...")
-        audio_clip = AudioFileClip(str(audio_path))
-        duracion_audio = audio_clip.duration
-        print(f"⏱️ Duración total de audio: {duracion_audio / 60:.2f} minutos ({duracion_audio:.1f} segundos)")
+    # Cargar audio
+    print("⏳ Analizando pista de audio maestro...")
+    audio_clip = AudioFileClip(str(audio_path))
+    duracion_audio = audio_clip.duration
+    print(f"⏱️ Duración exacta de audio: {duracion_audio / 60:.2f} minutos ({duracion_audio:.1f}s)")
 
-        print("⏳ Cargando y estandarizando clips de video...")
-        loaded_clips = []
-        duracion_video_total = 0.0
+    # Cargar timeline
+    timeline = []
+    if timeline_file.exists():
+        try:
+            with open(timeline_file, "r", encoding="utf-8") as f:
+                timeline = json.load(f)
+        except Exception:
+            pass
 
-        for clip_p in clips_paths:
-            try:
-                clip = VideoFileClip(str(clip_p))
-                # Redimensionar si es necesario para mantener consistencia
-                if clip.size != list(resolution):
-                    clip = clip.resize(resolution)
-                loaded_clips.append(clip)
-                duracion_video_total += clip.duration
-            except Exception as e:
-                print(f"⚠️ Advertencia: No se pudo cargar el clip '{clip_p.name}': {e}")
+    # Si no hay timeline, detectar imágenes en carpeta
+    image_files = sorted(list(images_dir.glob("escena_*.png")))
+    if not image_files:
+        print(f"❌ Error: No se encontraron imágenes en '{images_dir}'.")
+        print("Ejecuta primero la generación de imágenes con 'python generate_images.py'.")
+        return False
 
-        if not loaded_clips:
-            print("❌ Error: No se pudieron cargar clips de video válidos.")
-            return False
+    print(f"🖼️ Imágenes encontradas: {len(image_files)}")
 
-        print(f"⏱️ Duración combinada de clips cargados: {duracion_video_total:.1f} segundos")
+    # Construir clips animados
+    clips_animados = []
+    duracion_acumulada = 0.0
 
-        # Si el audio es más largo que la suma de clips, repetimos/distribuimos la secuencia en bucle
-        clips_para_concatenar = list(loaded_clips)
-        if duracion_video_total < duracion_audio:
-            repeticiones_necesarias = int(duracion_audio // duracion_video_total) + 1
-            print(
-                f"ℹ️ La duración de clips ({duracion_video_total:.1f}s) es menor a la narración ({duracion_audio:.1f}s). "
-                f"Componiendo ciclo de {repeticiones_necesarias} pasadas para cubrir el metraje completo..."
-            )
-            clips_para_concatenar = loaded_clips * repeticiones_necesarias
+    # Distribuir duraciones
+    for idx, img_p in enumerate(image_files):
+        # Obtener duración del timeline si existe
+        if idx < len(timeline) and "duration" in timeline[idx]:
+            dur_escena = float(timeline[idx]["duration"])
+        else:
+            # Duración aleatoria entre 13 y 18s
+            dur_escena = random.uniform(13.0, 18.0)
 
-        print("🔗 Concatenando clips de video...")
-        video_concatenado = concatenate_videoclips(clips_para_concatenar, method="compose")
+        # Seleccionar patrón de movimiento variado
+        motion = idx % 5
 
-        # Ajustar duración exacta del video a la duración del audio
-        video_final = video_concatenado.subclip(0, duracion_audio)
-        video_final = video_final.set_audio(audio_clip)
-
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_output = output_path.with_suffix('.mp4.tmp')
-
-        print(f"🚀 Renderizando video final a {resolution[0]}x{resolution[1]} @ {target_fps} fps...")
-        video_final.write_videofile(
-            str(temp_output),
+        print(f"  • Procesando escena {idx + 1}/{len(image_files)}: {img_p.name} ({dur_escena:.1f}s, Movimiento #{motion})")
+        clip = create_ken_burns_clip(
+            img_p,
+            duration=dur_escena,
+            target_resolution=resolution,
             fps=target_fps,
-            codec="libx264",
-            audio_codec="aac",
-            bitrate="8000k",
-            audio_bitrate="192k",
-            threads=4,
-            preset="medium"
+            motion_type=motion
         )
+        clips_animados.append(clip)
+        duracion_acumulada += dur_escena
 
-        if temp_output.exists():
-            if output_path.exists():
-                output_path.unlink()
-            temp_output.rename(output_path)
+    print(f"\n⏱️ Duración total de imágenes calculada: {duracion_acumulada:.1f}s (Audio: {duracion_audio:.1f}s)")
 
-        # Liberar recursos
-        audio_clip.close()
-        for c in loaded_clips:
-            c.close()
-        video_final.close()
+    # Si la duración de las imágenes es menor que el audio, estiramos o repetimos el ciclo
+    if duracion_acumulada < duracion_audio:
+        factor_ajuste = duracion_audio / duracion_acumulada
+        print(f"ℹ️ Ajustando ligeramente la velocidad de visualización ({factor_ajuste:.2f}x) para sincronización perfecta al 100% con el audio...")
+        # Re-crear con duración escalada
+        clips_animados = []
+        for idx, img_p in enumerate(image_files):
+            if idx < len(timeline) and "duration" in timeline[idx]:
+                dur_base = float(timeline[idx]["duration"])
+            else:
+                dur_base = 15.0
+            dur_escena = dur_base * factor_ajuste
+            motion = idx % 5
+            clip = create_ken_burns_clip(img_p, duration=dur_escena, target_resolution=resolution, fps=target_fps, motion_type=motion)
+            clips_animados.append(clip)
 
-        print("\n" + "=" * 60)
-        print("🎉 ¡VIDEO FINAL DE YOUTUBE GENERADO CON ÉXITO!")
-        print(f"📁 Ubicación: {output_path.resolve()}")
-        print(f"📊 Peso: {output_path.stat().st_size / (1024 * 1024):.2f} MB")
-        print(f"⏱️ Duración: {duracion_audio / 60:.2f} minutos")
-        print("=" * 60)
-        return True
+    print("🔗 Concatenando escenas animadas...")
+    video_concatenado = concatenate_videoclips(clips_animados, method="compose")
 
-    except Exception as e:
-        print(f"❌ Error durante el ensamblado del video: {e}")
-        return False
+    # Cortar exactamente a la longitud del audio
+    video_final = video_concatenado.subclip(0, duracion_audio)
+    video_final = video_final.set_audio(audio_clip)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_output = output_path.with_suffix(".mp4.tmp")
+
+    print(f"🚀 Renderizando video final a {resolution[0]}x{resolution[1]} @ {target_fps} fps (H.264 / AAC)...")
+    video_final.write_videofile(
+        str(temp_output),
+        fps=target_fps,
+        codec="libx264",
+        audio_codec="aac",
+        bitrate="6000k",
+        audio_bitrate="192k",
+        threads=4,
+        preset="medium"
+    )
+
+    if temp_output.exists():
+        if output_path.exists():
+            output_path.unlink()
+        temp_output.rename(output_path)
+
+    audio_clip.close()
+    video_final.close()
+
+    print("\n" + "=" * 65)
+    print("🎉 ¡VIDEO FINAL DE YOUTUBE GENERADO EXITOSAMENTE!")
+    print(f"📁 Archivo final: {output_path.resolve()}")
+    print(f"📊 Peso: {output_path.stat().st_size / (1024 * 1024):.2f} MB")
+    print(f"⏱️ Duración: {duracion_audio / 60:.2f} minutos")
+    print("=" * 65)
+    return True
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Ensamblador final de video y audio para YouTube (BMAD)")
-    parser.add_argument("--clips-dir", type=Path, default=VIDEOS_DIR, help="Carpeta con los clips mp4")
-    parser.add_argument("--audio", type=Path, default=AUDIO_PATH, help="Ruta al archivo audio_maestro.mp3")
+    parser = argparse.ArgumentParser(description="Ensamblador de video con efecto Ken Burns para YouTube")
+    parser.add_argument("--images-dir", type=Path, default=IMAGENES_DIR, help="Directorio con las imágenes PNG")
+    parser.add_argument("--audio", type=Path, default=AUDIO_PATH, help="Ruta al archivo de audio maestro")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_VIDEO, help="Ruta del video resultante")
     parser.add_argument("--fps", type=int, default=24, help="Cuadros por segundo (default: 24)")
     args = parser.parse_args()
 
     success = assemble_final_video(
-        videos_dir=args.clips_dir,
+        images_dir=args.images_dir,
         audio_path=args.audio,
         output_path=args.output,
         target_fps=args.fps

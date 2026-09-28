@@ -1,7 +1,7 @@
 {
     "completed_indices": [],
     "failed_indices": {
-        "0": "Error de Google (código 400): The number value for `durationSeconds` is out of bound. Please provide a value between 4 and 8, inclusive.",
+        "0": "El modelo 'veo-2.0-generate-001' no está disponible o no admite generación de video en este proyecto. Ejecuta con --check-models para ver los modelos habilitados en tu cuenta.",
         "1": "Error no recuperable de Google (código 404): models/veo-3.0-fast-generate-001 is not found for API version v1beta, or is not supported for predictLongRunning. Call ModelService.ListModels to see the list of available models and their supported methods.",
         "2": "Error no recuperable de Google (código 404): models/veo-3.0-fast-generate-001 is not found for API version v1beta, or is not supported for predictLongRunning. Call ModelService.ListModels to see the list of available models and their supported methods.",
         "3": "Error no recuperable de Google (código 404): models/veo-3.0-fast-generate-001 is not found for API version v1beta, or is not supported for predictLongRunning. Call ModelService.ListModels to see the list of available models and their supported methods.",
